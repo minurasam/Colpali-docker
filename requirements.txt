@@ -1,0 +1,11 @@
+torch
+transformers
+colpali-engine
+pillow
+pdf2image
+numpy
+fastapi
+uvicorn[standard]
+python-multipart
+qdrant-client
+pydantic
