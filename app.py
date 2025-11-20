@@ -22,7 +22,7 @@ def extract_and_embed_pdf(pdf_path, output_dir="./embeddings"):
     
     # Load model
     print("\n⏳ Loading ColPali model...")
-    model_name = "vidore/colpali-v1.2"
+    model_name = "vidore/colpali-v1.3"
     
     model = ColPali.from_pretrained(
         model_name,

@@ -157,9 +157,13 @@ async def ingest_pdf(
         tokens_per_page = None
 
         for page_num, page_image in enumerate(pages, 1):
-            logger.info(f"Processing page {page_num}/{len(pages)}")
+            logger.info(f"-" * 60)
+            logger.info(f"PAGE {page_num} of {len(pages)}")
+            logger.info(f"-" * 60)
+            logger.info(f"  Image size: {page_image.size}")
+            logger.info(f"  ⏳ Generating embeddings...")
 
-            # Generate embeddings
+            # Generate embeddings (same as app.py)
             batch_images = processor.process_images([page_image]).to(device)
 
             with torch.no_grad():
@@ -168,12 +172,23 @@ async def ingest_pdf(
             embeddings_np = embeddings.cpu().numpy()[0]
             tokens_per_page = embeddings_np.shape[0]
 
+            # Display embedding info (same as app.py)
+            logger.info(f"\n  EMBEDDING RESULTS:")
+            logger.info(f"    Shape: {embeddings_np.shape}")
+            logger.info(f"    Number of tokens/patches: {embeddings_np.shape[0]}")
+            logger.info(f"    Embedding dimension: {embeddings_np.shape[1]}")
+            logger.info(f"    Min value: {embeddings_np.min():.6f}")
+            logger.info(f"    Max value: {embeddings_np.max():.6f}")
+            logger.info(f"    Mean value: {embeddings_np.mean():.6f}")
+            logger.info(f"    Std deviation: {embeddings_np.std():.6f}")
+
             # Average pool the embeddings (from multiple tokens to single vector)
             avg_embedding = embeddings_np.mean(axis=0)
             embedding_dim = avg_embedding.shape[0]
+            logger.info(f"    Average pooled embedding dimension: {embedding_dim}")
 
-            # Create point for Qdrant
-            point_id = f"{document_id}_page_{page_num}"
+            # Create point for Qdrant (use UUID for point ID)
+            point_id = str(uuid.uuid4())
             point = PointStruct(
                 id=point_id,
                 vector=avg_embedding.tolist(),
@@ -265,8 +280,8 @@ async def ingest_image(
         avg_embedding = embeddings_np.mean(axis=0)
         embedding_dim = avg_embedding.shape[0]
 
-        # Create point for Qdrant
-        point_id = f"{document_id}_image"
+        # Create point for Qdrant (use UUID for point ID)
+        point_id = str(uuid.uuid4())
         point = PointStruct(
             id=point_id,
             vector=avg_embedding.tolist(),

@@ -29,11 +29,11 @@ services:
     depends_on:
       - qdrant
     restart: unless-stopped
-    # For GPU support (comment out if CPU only)
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+    # For GPU support (commented out for CPU-only mode)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
