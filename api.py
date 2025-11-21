@@ -16,14 +16,14 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
 import logging
 
-# Configure logging
+# Configure logs
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Initialize FastAPI app
 app = FastAPI(
     title="ColPali Document Embedding API",
-    description="API for generating and storing document embeddings using ColPali",
+    description="API for generating and storing document embeddings using ColPali-v1.3",
     version="1.0.0"
 )
 
