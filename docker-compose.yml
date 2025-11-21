@@ -23,8 +23,13 @@ services:
       - ./uploads:/app/uploads
     environment:
       - TRANSFORMERS_CACHE=/root/.cache/huggingface
+      # === Local Qdrant Configuration ===
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
+      # === Qdrant Cloud Configuration (uncomment and set to use cloud) ===
+      # - QDRANT_URL=https://your-cluster-url.cloud.qdrant.io:6333
+      # - QDRANT_API_KEY=your-api-key-here
+      # === Collection Configuration ===
       - COLLECTION_NAME=colpali_embeddings
     depends_on:
       - qdrant

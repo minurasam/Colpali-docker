@@ -1,0 +1,32 @@
+version: '3.8'
+
+# Docker Compose for Qdrant Cloud
+# Usage: docker-compose -f docker-compose.cloud.yml up --build
+
+services:
+  colpali-api:
+    build: .
+    container_name: colpali-api
+    ports:
+      - "8000:8000"
+    volumes:
+      # Cache models to avoid re-downloading
+      - ~/.cache/huggingface:/root/.cache/huggingface
+      # Optional: mount uploads directory to persist files
+      - ./uploads:/app/uploads
+    environment:
+      - TRANSFORMERS_CACHE=/root/.cache/huggingface
+      # === Qdrant Cloud Configuration ===
+      - QDRANT_URL=${QDRANT_URL}
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
+      # === Collection Configuration ===
+      - COLLECTION_NAME=${COLLECTION_NAME:-colpali_embeddings}
+    restart: unless-stopped
+    # For GPU support (uncomment if using NVIDIA GPU)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
