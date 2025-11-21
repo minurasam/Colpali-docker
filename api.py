@@ -34,9 +34,13 @@ qdrant_client = None
 device = None
 
 # Configuration
-QDRANT_HOST = os.getenv("QDRANT_HOST", "qdrant")
-QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))
-COLLECTION_NAME = os.getenv("COLLECTION_NAME", "colpali_embeddings")
+# For local Qdrant: QDRANT_HOST=qdrant, QDRANT_PORT=6333
+# For Qdrant Cloud: QDRANT_URL=https://xxx.cloud.qdrant.io:6333, QDRANT_API_KEY=your-api-key
+QDRANT_URL = os.getenv("QDRANT_URL", None)  # Full URL for Qdrant Cloud (e.g., https://xxx.cloud.qdrant.io:6333)
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", None)  # API key for Qdrant Cloud
+QDRANT_HOST = os.getenv("QDRANT_HOST", "qdrant")  # For local Qdrant
+QDRANT_PORT = int(os.getenv("QDRANT_PORT", "6333"))  # For local Qdrant
+COLLECTION_NAME = os.getenv("COLLECTION_NAME", "colpali-test")
 UPLOAD_DIR = Path("/app/uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
@@ -89,27 +93,49 @@ async def startup_event():
         logger.error(f"Failed to load ColPali model: {e}")
         raise
 
-    # Initialize Qdrant client
-    try:
-        logger.info(f"Connecting to Qdrant at {QDRANT_HOST}:{QDRANT_PORT}...")
-        qdrant_client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+    # Initialize Qdrant client with retry logic
+    import time
+    max_retries = 3
+    retry_delay = 5
 
-        # Create collection if it doesn't exist
-        collections = qdrant_client.get_collections().collections
-        collection_exists = any(c.name == COLLECTION_NAME for c in collections)
+    for attempt in range(max_retries):
+        try:
+            # Check if using Qdrant Cloud (URL and API key provided)
+            if QDRANT_URL and QDRANT_API_KEY:
+                logger.info(f"Connecting to Qdrant Cloud at {QDRANT_URL}...")
+                qdrant_client = QdrantClient(
+                    url=QDRANT_URL,
+                    api_key=QDRANT_API_KEY,
+                    timeout=30
+                )
+            else:
+                # Use local Qdrant
+                logger.info(f"Connecting to local Qdrant at {QDRANT_HOST}:{QDRANT_PORT}...")
+                qdrant_client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
 
-        if not collection_exists:
-            logger.info(f"Creating collection: {COLLECTION_NAME}")
-            # ColPali generates embeddings with dimension 128 per token
-            # We'll store the average pooled embedding for each page
-            qdrant_client.create_collection(
-                collection_name=COLLECTION_NAME,
-                vectors_config=VectorParams(size=128, distance=Distance.COSINE)
-            )
-        logger.info("Qdrant connected successfully!")
-    except Exception as e:
-        logger.error(f"Failed to connect to Qdrant: {e}")
-        raise
+            # Create collection if it doesn't exist
+            collections = qdrant_client.get_collections().collections
+            collection_exists = any(c.name == COLLECTION_NAME for c in collections)
+
+            if not collection_exists:
+                logger.info(f"Creating collection: {COLLECTION_NAME}")
+                # ColPali generates embeddings with dimension 128 per token
+                # We'll store the average pooled embedding for each page
+                qdrant_client.create_collection(
+                    collection_name=COLLECTION_NAME,
+                    vectors_config=VectorParams(size=128, distance=Distance.COSINE)
+                )
+            else:
+                logger.info(f"Collection '{COLLECTION_NAME}' already exists")
+            logger.info("Qdrant connected successfully!")
+            break  # Success, exit retry loop
+        except Exception as e:
+            logger.error(f"Attempt {attempt + 1}/{max_retries} - Failed to connect to Qdrant: {e}")
+            if attempt < max_retries - 1:
+                logger.info(f"Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+            else:
+                raise
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
