@@ -84,7 +84,7 @@ async def startup_event():
         model_name = "vidore/colpali-v1.2"
         model = ColPali.from_pretrained(
             model_name,
-            torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
+            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
             device_map=device
         )
         processor = ColPaliProcessor.from_pretrained(model_name)
