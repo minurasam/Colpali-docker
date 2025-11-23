@@ -1,4 +1,4 @@
-# ColPali Document Embedding API - Azure Kubernetes Service Deployment
+# ColPali Document Embedding API with Qdrant
 
 This project provides a production-ready deployment of the ColPali document embedding model on Azure Kubernetes Service (AKS) with Qdrant vector database integration.
 
