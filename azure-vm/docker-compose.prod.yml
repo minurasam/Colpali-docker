@@ -1,0 +1,105 @@
+version: '3.8'
+
+# =============================================================================
+# Production Docker Compose for Azure VM Deployment
+# =============================================================================
+# This configuration is optimized for production Azure VM deployment
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # Qdrant Vector Database (Local)
+  # Remove this service if using Qdrant Cloud
+  # ---------------------------------------------------------------------------
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - /opt/colpali/qdrant_storage:/qdrant/storage
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # ColPali API Service
+  # ---------------------------------------------------------------------------
+  colpali-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: colpali-api:latest
+    container_name: colpali-api
+    ports:
+      - "8000:8000"
+    volumes:
+      # Persist HuggingFace model cache (prevents re-downloading ~5GB model)
+      - /opt/colpali/huggingface_cache:/root/.cache/huggingface
+      # Persist uploads directory
+      - /opt/colpali/uploads:/app/uploads
+      # Logs directory
+      - /opt/colpali/logs:/app/logs
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TRANSFORMERS_CACHE=/root/.cache/huggingface
+      # === Local Qdrant Configuration ===
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      # === Qdrant Cloud Configuration (uncomment to use cloud) ===
+      # - QDRANT_URL=${QDRANT_URL}
+      # - QDRANT_API_KEY=${QDRANT_API_KEY}
+      # === Collection Configuration ===
+      - COLLECTION_NAME=${COLLECTION_NAME:-colpali_embeddings}
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 300s  # 5 minutes for model loading
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "200m"
+        max-file: "5"
+    # ---------------------------------------------------------------------------
+    # GPU Configuration (Uncomment for GPU-enabled VMs)
+    # ---------------------------------------------------------------------------
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  default:
+    name: colpali-network
+    driver: bridge
+
+# =============================================================================
+# Volumes (Named volumes for better management)
+# =============================================================================
+volumes:
+  qdrant_data:
+    driver: local
+  huggingface_cache:
+    driver: local

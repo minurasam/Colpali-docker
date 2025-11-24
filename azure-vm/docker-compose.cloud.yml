@@ -1,0 +1,67 @@
+version: '3.8'
+
+# =============================================================================
+# Production Docker Compose for Azure VM with Qdrant Cloud
+# =============================================================================
+# Use this configuration when connecting to Qdrant Cloud instead of local
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # ColPali API Service (Connects to Qdrant Cloud)
+  # ---------------------------------------------------------------------------
+  colpali-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: colpali-api:latest
+    container_name: colpali-api
+    ports:
+      - "8000:8000"
+    volumes:
+      # Persist HuggingFace model cache
+      - /opt/colpali/huggingface_cache:/root/.cache/huggingface
+      # Persist uploads directory
+      - /opt/colpali/uploads:/app/uploads
+      # Logs directory
+      - /opt/colpali/logs:/app/logs
+    environment:
+      - PYTHONUNBUFFERED=1
+      - TRANSFORMERS_CACHE=/root/.cache/huggingface
+      # === Qdrant Cloud Configuration ===
+      - QDRANT_URL=${QDRANT_URL}
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
+      # === Collection Configuration ===
+      - COLLECTION_NAME=${COLLECTION_NAME:-colpali-embeddings-128}
+    env_file:
+      - .env
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 300s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "200m"
+        max-file: "5"
+    # ---------------------------------------------------------------------------
+    # GPU Configuration (Uncomment for GPU-enabled VMs)
+    # ---------------------------------------------------------------------------
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+networks:
+  default:
+    name: colpali-network
+    driver: bridge

@@ -71,3 +71,16 @@ k8s/secrets/
 
 # Azure
 .azure/
+azure-vm/.env
+
+# Azure VM deployment (keep scripts, ignore generated files)
+/opt/colpali/
+
+# Model cache (large files)
+huggingface_cache/
+*.bin
+*.safetensors
+*.onnx
+
+# Numpy embeddings
+*.npy
