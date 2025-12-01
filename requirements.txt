@@ -9,3 +9,6 @@ uvicorn[standard]
 python-multipart
 qdrant-client
 pydantic
+azure-storage-blob
+Office365-REST-Python-Client
+python-dotenv

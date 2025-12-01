@@ -1,11 +1,12 @@
 FROM nvidia/cuda:11.8.0-runtime-ubuntu22.04
+FROM python:3.11-slim-bullseye
 
 # Set working directory
 WORKDIR /app
 
 # Install system dependencies including poppler
 RUN apt-get update && apt-get install -y \
-    python3.10 \
+    python3.11 \
     python3-pip \
     poppler-utils \
     git \
