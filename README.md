@@ -1,6 +1,6 @@
 # ColPali Document Embedding API with Qdrant
 
-This project provides a production-ready deployment of the ColPali document embedding model on Azure Kubernetes Service (AKS) with Qdrant vector database integration.
+This project provides a production-ready deployment of the ColPali document embedding model on Azure Kubernetes Service (AKS) with Qdrant vector database integration, plus SharePoint to Azure Blob Storage sync capabilities.
 
 ## Overview
 
@@ -13,6 +13,37 @@ This project provides a production-ready deployment of the ColPali document embe
 - GPU-accelerated inference on AKS
 - Horizontal pod autoscaling
 - Production-ready Kubernetes manifests
+- **SharePoint to Blob Storage sync** with batch processing and duplicate detection ⭐
+
+## Quick Start: SharePoint Sync
+
+Sync files from SharePoint to Azure Blob Storage with automatic duplicate detection:
+
+```bash
+# 1. Configure environment variables in .env
+cp .env.example .env
+# Edit .env with your SharePoint and Blob Storage credentials
+
+# 2. Install dependencies
+pip install -r requirements.txt
+
+# 3. Run sync
+python sync_sharepoint.py
+```
+
+**Features:**
+- 📦 Batch processing with resume capability
+- 🔍 Content-based duplicate detection (SHA-256)
+- 📊 SQLite tracking database
+- 🔄 Automatic retry for failed transfers
+- 📈 Statistics and monitoring
+
+**Documentation:**
+- [Quick Start Guide](docs/USAGE.md)
+- [Batch Processing Details](docs/BATCH_PROCESSING.md)
+- [Azure Setup Instructions](docs/SHAREPOINT_BLOB_SETUP.md)
+- [Project Structure](PROJECT_STRUCTURE.md)
+- [Examples](examples/)
 
 ## Architecture
 

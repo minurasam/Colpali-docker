@@ -80,3 +80,9 @@ huggingface_cache/
 
 # Numpy embeddings
 *.npy
+
+# File tracking database
+file_tracking.db
+file_tracking.db-*
+*.db
+*.db-journal
