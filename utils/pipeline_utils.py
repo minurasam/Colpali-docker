@@ -1,7 +1,6 @@
 import os
 import logging
 from typing import List, Optional, Dict
-from pathlib import Path
 import tempfile
 import hashlib
 import sqlite3
@@ -10,8 +9,7 @@ import json
 
 from office365.sharepoint.client_context import ClientContext
 from office365.runtime.auth.client_credential import ClientCredential
-from office365.sharepoint.files.file import File
-from azure.storage.blob import BlobServiceClient, ContainerClient
+from azure.storage.blob import BlobServiceClient
 from azure.core.exceptions import AzureError
 
 # Configure logging
@@ -21,13 +19,13 @@ logger = logging.getLogger(__name__)
 
 class FileTracker:
     """
-    SQLite-based file tracking system for batch processing and duplicate detection.
+    SQLite-based file tracking system for SharePoint to Blob sync.
 
     Tracks:
     - File hash (content-based duplicate detection)
-    - Processing status (pending, processing, completed, failed)
-    - Timestamps (created, modified, processed)
-    - Blob URLs and metadata
+    - Processing status (pending, completed, failed)
+    - Timestamps (uploaded, modified)
+    - Blob URLs and SharePoint metadata
     """
 
     def __init__(self, db_path: str = "file_tracking.db"):
@@ -49,19 +47,16 @@ class FileTracker:
             CREATE TABLE IF NOT EXISTS file_tracking (
                 file_id TEXT PRIMARY KEY,
                 file_name TEXT NOT NULL,
-                file_path TEXT NOT NULL,
+                sharepoint_path TEXT NOT NULL,
                 file_hash TEXT NOT NULL,
                 file_size INTEGER,
-                last_modified TEXT,
-                processing_timestamp TEXT,
-                completion_timestamp TEXT,
+                sharepoint_modified TEXT,
+                upload_timestamp TEXT,
                 status TEXT DEFAULT 'pending',
                 blob_url TEXT,
                 blob_name TEXT,
-                vector_ids TEXT,
                 error_message TEXT,
                 retry_count INTEGER DEFAULT 0,
-                metadata TEXT,
                 UNIQUE(file_hash)
             )
         """)
@@ -121,11 +116,10 @@ class FileTracker:
         self,
         file_id: str,
         file_name: str,
-        file_path: str,
+        sharepoint_path: str,
         file_hash: str,
         file_size: int,
-        last_modified: str = None,
-        metadata: Dict = None
+        sharepoint_modified: str = None
     ) -> bool:
         """
         Add new file to tracking database.
@@ -133,11 +127,10 @@ class FileTracker:
         Args:
             file_id: Unique identifier for file
             file_name: Name of file
-            file_path: Path/URL of file
+            sharepoint_path: SharePoint path/URL of file
             file_hash: Content hash
             file_size: Size in bytes
-            last_modified: Last modified timestamp
-            metadata: Additional metadata as dict
+            sharepoint_modified: Last modified timestamp from SharePoint
 
         Returns:
             True if added, False if duplicate hash exists
@@ -154,10 +147,9 @@ class FileTracker:
         try:
             cursor.execute("""
                 INSERT INTO file_tracking
-                (file_id, file_name, file_path, file_hash, file_size, last_modified, metadata, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
-            """, (file_id, file_name, file_path, file_hash, file_size, last_modified,
-                  json.dumps(metadata) if metadata else None))
+                (file_id, file_name, sharepoint_path, file_hash, file_size, sharepoint_modified, status)
+                VALUES (?, ?, ?, ?, ?, ?, 'pending')
+            """, (file_id, file_name, sharepoint_path, file_hash, file_size, sharepoint_modified))
 
             conn.commit()
             logger.info(f"Added file to tracking: {file_name} (hash: {file_hash[:16]}...)")
@@ -174,7 +166,6 @@ class FileTracker:
         status: str,
         blob_url: str = None,
         blob_name: str = None,
-        vector_ids: List[str] = None,
         error_message: str = None
     ):
         """
@@ -182,10 +173,9 @@ class FileTracker:
 
         Args:
             file_hash: Hash of file
-            status: New status (pending, processing, completed, failed)
+            status: New status (pending, completed, failed)
             blob_url: URL of uploaded blob
             blob_name: Name of blob in storage
-            vector_ids: List of vector IDs in vector database
             error_message: Error message if failed
         """
         conn = sqlite3.connect(self.db_path)
@@ -196,11 +186,8 @@ class FileTracker:
         update_fields = ["status = ?"]
         values = [status]
 
-        if status == "processing":
-            update_fields.append("processing_timestamp = ?")
-            values.append(timestamp)
-        elif status == "completed":
-            update_fields.append("completion_timestamp = ?")
+        if status == "completed":
+            update_fields.append("upload_timestamp = ?")
             values.append(timestamp)
 
         if blob_url:
@@ -210,10 +197,6 @@ class FileTracker:
         if blob_name:
             update_fields.append("blob_name = ?")
             values.append(blob_name)
-
-        if vector_ids:
-            update_fields.append("vector_ids = ?")
-            values.append(json.dumps(vector_ids))
 
         if error_message:
             update_fields.append("error_message = ?")
@@ -312,25 +295,12 @@ class FileTracker:
         conn.close()
         return stats
 
-    def reset_processing_files(self):
-        """Reset files stuck in 'processing' status back to 'pending'."""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-
-        cursor.execute("UPDATE file_tracking SET status = 'pending' WHERE status = 'processing'")
-        updated = cursor.rowcount
-
-        conn.commit()
-        conn.close()
-
-        if updated > 0:
-            logger.info(f"Reset {updated} files from 'processing' to 'pending'")
 
 
 class SharePointToBlobUploader:
     """
-    A utility class to upload files from SharePoint to Azure Blob Storage
-    with batch processing and duplicate detection capabilities.
+    Simplified utility class to upload files from SharePoint to Azure Blob Storage
+    with SQLite-based file tracking and duplicate detection.
     """
 
     def __init__(
@@ -338,40 +308,42 @@ class SharePointToBlobUploader:
         sharepoint_site_url: str,
         sharepoint_client_id: str,
         sharepoint_client_secret: str,
-        blob_connection_string: str,
+        blob_service_client: BlobServiceClient,
         blob_container_name: str,
-        enable_tracking: bool = True,
         tracking_db_path: str = "file_tracking.db",
     ):
         """
         Initialize the SharePoint to Blob uploader.
 
         Args:
-            sharepoint_site_url: SharePoint site URL (e.g., https://yourtenant.sharepoint.com/sites/yoursite)
+            sharepoint_site_url: SharePoint site URL
             sharepoint_client_id: Azure AD App Client ID with SharePoint permissions
             sharepoint_client_secret: Azure AD App Client Secret
-            blob_connection_string: Azure Storage Account connection string
+            blob_service_client: Azure Blob Service Client (configured with SAS or connection string)
             blob_container_name: Target blob container name
-            enable_tracking: Enable file tracking and duplicate detection
             tracking_db_path: Path to SQLite tracking database
         """
 
         self.sharepoint_site_url = sharepoint_site_url
         self.sharepoint_client_id = sharepoint_client_id
         self.sharepoint_client_secret = sharepoint_client_secret
-        self.blob_connection_string = blob_connection_string
         self.blob_container_name = blob_container_name
-        self.enable_tracking = enable_tracking
 
         # Initialize file tracker
-        if self.enable_tracking:
-            self.tracker = FileTracker(tracking_db_path)
-        else:
-            self.tracker = None
+        self.tracker = FileTracker(tracking_db_path)
 
         # Initialize clients
         self._init_sharepoint_client()
-        self._init_blob_client()
+        self.blob_service_client = blob_service_client
+        self.container_client = self.blob_service_client.get_container_client(
+            self.blob_container_name
+        )
+
+        # Verify container exists
+        if self.container_client.exists():
+            logger.info(f"Connected to container: {self.blob_container_name}")
+        else:
+            logger.warning(f"Container does not exist: {self.blob_container_name}")
 
     def _init_sharepoint_client(self):
         # Initialize SharePoint client context
@@ -387,26 +359,6 @@ class SharePointToBlobUploader:
             logger.error(f"Failed to initialize SharePoint client: {e}")
             raise
 
-    def _init_blob_client(self):
-        """Initialize Azure Blob Storage client."""
-        try:
-            self.blob_service_client = BlobServiceClient.from_connection_string(
-                self.blob_connection_string
-            )
-            self.container_client = self.blob_service_client.get_container_client(
-                self.blob_container_name
-            )
-
-            # Create container if it doesn't exist
-            if not self.container_client.exists():
-                self.container_client.create_container()
-                logger.info(f"Created container: {self.blob_container_name}")
-            else:
-                logger.info(f"Container exists: {self.blob_container_name}")
-
-        except AzureError as e:
-            logger.error(f"Failed to initialize Blob Storage client: {e}")
-            raise
 
     def list_sharepoint_files(
         self, folder_path: str, file_extensions: Optional[List[str]] = None
@@ -568,44 +520,36 @@ class SharePointToBlobUploader:
                     self.download_sharepoint_file(server_relative_url, local_path)
 
                     # Calculate file hash for duplicate detection
-                    if self.enable_tracking:
-                        file_hash = self.tracker.calculate_file_hash(local_path)
+                    file_hash = self.tracker.calculate_file_hash(local_path)
 
-                        # Check if file already exists
-                        if skip_duplicates:
-                            existing = self.tracker.file_exists(file_hash)
-                            if existing:
-                                logger.info(f"Skipping duplicate file: {file_name} (already processed as {existing['file_name']})")
-                                results.append({
-                                    "file_name": file_name,
-                                    "sharepoint_url": server_relative_url,
-                                    "status": "skipped",
-                                    "reason": "duplicate",
-                                    "existing_blob_url": existing.get("blob_url"),
-                                    "file_hash": file_hash[:16] + "..."
-                                })
-                                # Delete local file
-                                if os.path.exists(local_path):
-                                    os.remove(local_path)
-                                continue
+                    # Check if file already exists
+                    if skip_duplicates:
+                        existing = self.tracker.file_exists(file_hash)
+                        if existing:
+                            logger.info(f"Skipping duplicate file: {file_name} (already processed as {existing['file_name']})")
+                            results.append({
+                                "file_name": file_name,
+                                "sharepoint_url": server_relative_url,
+                                "status": "skipped",
+                                "reason": "duplicate",
+                                "existing_blob_url": existing.get("blob_url"),
+                                "file_hash": file_hash[:16] + "..."
+                            })
+                            # Delete local file
+                            if os.path.exists(local_path):
+                                os.remove(local_path)
+                            continue
 
-                        # Add file to tracking database
-                        file_id = f"{sharepoint_folder_path}/{file_name}"
-                        self.tracker.add_file(
-                            file_id=file_id,
-                            file_name=file_name,
-                            file_path=server_relative_url,
-                            file_hash=file_hash,
-                            file_size=sp_file["size"],
-                            last_modified=sp_file.get("time_modified"),
-                            metadata={
-                                "sharepoint_folder": sharepoint_folder_path,
-                                "time_created": sp_file.get("time_created")
-                            }
-                        )
-
-                        # Update status to processing
-                        self.tracker.update_status(file_hash, "processing")
+                    # Add file to tracking database
+                    file_id = f"{sharepoint_folder_path}/{file_name}"
+                    self.tracker.add_file(
+                        file_id=file_id,
+                        file_name=file_name,
+                        sharepoint_path=server_relative_url,
+                        file_hash=file_hash,
+                        file_size=sp_file["size"],
+                        sharepoint_modified=sp_file.get("time_modified")
+                    )
 
                     # Construct blob name with optional prefix
                     if blob_folder_prefix:
@@ -617,13 +561,12 @@ class SharePointToBlobUploader:
                     blob_url = self.upload_to_blob(local_path, blob_name)
 
                     # Update tracking status to completed
-                    if self.enable_tracking and file_hash:
-                        self.tracker.update_status(
-                            file_hash,
-                            "completed",
-                            blob_url=blob_url,
-                            blob_name=blob_name
-                        )
+                    self.tracker.update_status(
+                        file_hash,
+                        "completed",
+                        blob_url=blob_url,
+                        blob_name=blob_name
+                    )
 
                     # Record result
                     result = {
@@ -647,7 +590,7 @@ class SharePointToBlobUploader:
                     logger.error(f"Failed to transfer file {file_name}: {error_msg}")
 
                     # Update tracking status to failed
-                    if self.enable_tracking and file_hash:
+                    if file_hash:
                         self.tracker.update_status(
                             file_hash,
                             "failed",
@@ -679,84 +622,6 @@ class SharePointToBlobUploader:
             logger.error(f"Error during file transfer: {e}")
             raise
 
-    def process_batch(
-        self,
-        sharepoint_folder_path: str,
-        blob_folder_prefix: Optional[str] = None,
-        file_extensions: Optional[List[str]] = None,
-        batch_size: int = 10,
-        resume_failed: bool = True,
-    ) -> Dict:
-        """
-        Process files in batches with resume capability.
-
-        Args:
-            sharepoint_folder_path: SharePoint folder path
-            blob_folder_prefix: Optional prefix for blob names
-            file_extensions: Optional list of file extensions to filter
-            batch_size: Number of files to process per batch
-            resume_failed: Retry previously failed files
-
-        Returns:
-            Dictionary with batch processing results and statistics
-        """
-        if not self.enable_tracking:
-            raise ValueError("Batch processing requires tracking to be enabled")
-
-        logger.info("Starting batch processing...")
-
-        # Reset any files stuck in 'processing' status
-        self.tracker.reset_processing_files()
-
-        # Get pending files
-        pending_files = self.tracker.get_pending_files()
-        logger.info(f"Found {len(pending_files)} pending files")
-
-        # Get failed files if resume is enabled
-        failed_files = []
-        if resume_failed:
-            failed_files = self.tracker.get_failed_files()
-            logger.info(f"Found {len(failed_files)} failed files to retry")
-
-        # Combine pending and failed files
-        all_files = pending_files + failed_files
-
-        if not all_files:
-            logger.info("No files to process")
-            return {"status": "complete", "files_processed": 0}
-
-        # Process in batches
-        total_batches = (len(all_files) + batch_size - 1) // batch_size
-        results = []
-
-        for batch_num in range(total_batches):
-            start_idx = batch_num * batch_size
-            end_idx = min((batch_num + 1) * batch_size, len(all_files))
-            batch = all_files[start_idx:end_idx]
-
-            logger.info(f"Processing batch {batch_num + 1}/{total_batches} ({len(batch)} files)")
-
-            # Process batch using transfer_files
-            batch_results = self.transfer_files(
-                sharepoint_folder_path=sharepoint_folder_path,
-                blob_folder_prefix=blob_folder_prefix,
-                file_extensions=file_extensions,
-                skip_duplicates=True,
-            )
-
-            results.extend(batch_results)
-
-        # Get final statistics
-        stats = self.get_tracking_stats()
-
-        return {
-            "status": "complete",
-            "total_files": len(all_files),
-            "files_processed": len(results),
-            "statistics": stats,
-            "results": results
-        }
-
     def get_tracking_stats(self) -> Dict:
         """
         Get file tracking statistics.
@@ -764,197 +629,6 @@ class SharePointToBlobUploader:
         Returns:
             Dictionary with statistics by status
         """
-        if not self.enable_tracking:
-            return {"error": "Tracking not enabled"}
-
         return self.tracker.get_statistics()
 
-    def retry_failed_files(
-        self,
-        sharepoint_folder_path: str,
-        blob_folder_prefix: Optional[str] = None,
-        max_retries: int = 3,
-    ) -> List[Dict]:
-        """
-        Retry previously failed file transfers.
 
-        Args:
-            sharepoint_folder_path: SharePoint folder path
-            blob_folder_prefix: Optional prefix for blob names
-            max_retries: Maximum number of retries per file
-
-        Returns:
-            List of retry results
-        """
-        if not self.enable_tracking:
-            raise ValueError("Retry functionality requires tracking to be enabled")
-
-        failed_files = self.tracker.get_failed_files(max_retries=max_retries)
-
-        if not failed_files:
-            logger.info("No failed files to retry")
-            return []
-
-        logger.info(f"Retrying {len(failed_files)} failed files")
-
-        # Extract file info and process
-        results = []
-        for failed_file in failed_files:
-            try:
-                logger.info(f"Retrying: {failed_file['file_name']}")
-
-                # Download and upload using existing methods
-                # This is a simplified retry - you may want to enhance this
-                file_name = failed_file['file_name']
-                server_relative_url = failed_file['file_path']
-
-                # Use temp directory
-                with tempfile.TemporaryDirectory() as temp_dir:
-                    local_path = os.path.join(temp_dir, file_name)
-                    self.download_sharepoint_file(server_relative_url, local_path)
-
-                    # Calculate hash and update status
-                    file_hash = self.tracker.calculate_file_hash(local_path)
-                    self.tracker.update_status(file_hash, "processing")
-
-                    # Construct blob name
-                    if blob_folder_prefix:
-                        blob_name = f"{blob_folder_prefix.rstrip('/')}/{file_name}"
-                    else:
-                        blob_name = file_name
-
-                    # Upload
-                    blob_url = self.upload_to_blob(local_path, blob_name)
-
-                    # Update to completed
-                    self.tracker.update_status(
-                        file_hash,
-                        "completed",
-                        blob_url=blob_url,
-                        blob_name=blob_name
-                    )
-
-                    results.append({
-                        "file_name": file_name,
-                        "status": "success",
-                        "blob_url": blob_url
-                    })
-
-            except Exception as e:
-                error_msg = str(e)
-                logger.error(f"Retry failed for {failed_file['file_name']}: {error_msg}")
-
-                # Update failed status
-                file_hash = failed_file['file_hash']
-                self.tracker.update_status(
-                    file_hash,
-                    "failed",
-                    error_message=error_msg
-                )
-
-                results.append({
-                    "file_name": failed_file['file_name'],
-                    "status": "failed",
-                    "error": error_msg
-                })
-
-        return results
-
-
-def upload_sharepoint_to_blob(
-    sharepoint_site_url: str,
-    sharepoint_folder_path: str,
-    sharepoint_client_id: str,
-    sharepoint_client_secret: str,
-    blob_connection_string: str,
-    blob_container_name: str,
-    blob_folder_prefix: Optional[str] = None,
-    file_extensions: Optional[List[str]] = None,
-) -> List[Dict[str, str]]:
-    """
-    Convenience function to upload files from SharePoint to Azure Blob Storage.
-
-    Args:
-        sharepoint_site_url: SharePoint site URL
-        sharepoint_folder_path: SharePoint folder path to upload from
-        sharepoint_client_id: Azure AD App Client ID
-        sharepoint_client_secret: Azure AD App Client Secret
-        blob_connection_string: Azure Storage connection string
-        blob_container_name: Target blob container name
-        blob_folder_prefix: Optional prefix for blob names
-        file_extensions: Optional list of file extensions to filter (e.g., ['.pdf', '.docx'])
-
-    Returns:
-        List of upload results
-
-    Example:
-        ```python
-        from pipeline_utils import upload_sharepoint_to_blob
-
-        results = upload_sharepoint_to_blob(
-            sharepoint_site_url="https://contoso.sharepoint.com/sites/mysite",
-            sharepoint_folder_path="Shared Documents/PDFs",
-            sharepoint_client_id="your-client-id",
-            sharepoint_client_secret="your-client-secret",
-            blob_connection_string="DefaultEndpointsProtocol=https;...",
-            blob_container_name="documents",
-            blob_folder_prefix="pdfs",
-            file_extensions=['.pdf']
-        )
-
-        for result in results:
-            if result['status'] == 'success':
-                print(f"Uploaded: {result['file_name']} -> {result['blob_url']}")
-            else:
-                print(f"Failed: {result['file_name']} - {result.get('error', 'Unknown error')}")
-        ```
-    """
-    uploader = SharePointToBlobUploader(
-        sharepoint_site_url=sharepoint_site_url,
-        sharepoint_client_id=sharepoint_client_id,
-        sharepoint_client_secret=sharepoint_client_secret,
-        blob_connection_string=blob_connection_string,
-        blob_container_name=blob_container_name,
-    )
-
-    return uploader.transfer_files(
-        sharepoint_folder_path=sharepoint_folder_path,
-        blob_folder_prefix=blob_folder_prefix,
-        file_extensions=file_extensions,
-    )
-
-
-if __name__ == "__main__":
-    """
-    Example usage with environment variables.
-
-    Required environment variables:
-    - SHAREPOINT_SITE_URL
-    - SHAREPOINT_CLIENT_ID
-    - SHAREPOINT_CLIENT_SECRET
-    - SHAREPOINT_FOLDER_PATH
-    - AZURE_STORAGE_CONNECTION_STRING
-    - BLOB_CONTAINER_NAME
-    """
-    import os
-    from dotenv import load_dotenv
-
-    load_dotenv()
-
-    # Example configuration
-    results = upload_sharepoint_to_blob(
-        sharepoint_site_url=os.getenv("SHAREPOINT_SITE_URL"),
-        sharepoint_folder_path=os.getenv("SHAREPOINT_FOLDER_PATH", "Shared Documents"),
-        sharepoint_client_id=os.getenv("SHAREPOINT_CLIENT_ID"),
-        sharepoint_client_secret=os.getenv("SHAREPOINT_CLIENT_SECRET"),
-        blob_connection_string=os.getenv("AZURE_STORAGE_CONNECTION_STRING"),
-        blob_container_name=os.getenv("BLOB_CONTAINER_NAME", "documents"),
-        blob_folder_prefix=os.getenv("BLOB_FOLDER_PREFIX"),
-        file_extensions=[".pdf", ".docx", ".xlsx"],  # Optional: filter by extensions
-    )
-
-    # Print results
-    print(f"\nTransfer Summary:")
-    print(f"Total files: {len(results)}")
-    print(f"Successful: {sum(1 for r in results if r['status'] == 'success')}")
-    print(f"Failed: {sum(1 for r in results if r['status'] == 'failed')}")

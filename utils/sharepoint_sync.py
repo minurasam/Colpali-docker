@@ -1,17 +1,18 @@
 """
-SharePoint to Azure Blob Storage sync utility.
-Adapted for your environment variable structure with SAS URLs.
+SharePoint to Azure Blob Storage sync utility with SQLite file tracking.
+Simplified version that focuses only on download from SharePoint and upload to Blob.
 """
 
 import os
 from typing import List, Dict, Optional
 from dotenv import load_dotenv
-from urllib.parse import urlparse, parse_qs
-from .pipeline_utils import SharePointToBlobUploader, FileTracker
-from azure.storage.blob import BlobServiceClient, ContainerClient
+from urllib.parse import urlparse
+from pipeline_utils import SharePointToBlobUploader
+from azure.storage.blob import BlobServiceClient
 import logging
 
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 
 def parse_sas_url(sas_url: str) -> Dict[str, str]:
@@ -45,37 +46,32 @@ def parse_sas_url(sas_url: str) -> Dict[str, str]:
 
 class SharePointBlobSync:
     """
-    Wrapper class for SharePoint to Blob sync using your environment variables.
+    Simplified SharePoint to Blob sync with SQLite file tracking.
     """
 
     def __init__(
         self,
-        tenant_id: str = None,
         client_id: str = None,
         client_secret: str = None,
         site_url: str = None,
         drive_path: str = None,
         container_sas_url: str = None,
-        enable_tracking: bool = True,
         tracking_db_path: str = "file_tracking.db"
     ):
         """
-        Initialize sync with your environment variable structure.
+        Initialize sync with environment variables.
 
         Args:
-            tenant_id: Azure AD Tenant ID
             client_id: Azure AD App Client ID
             client_secret: Azure AD App Client Secret
             site_url: SharePoint site URL
             drive_path: SharePoint drive/folder path
             container_sas_url: Azure Blob Container SAS URL
-            enable_tracking: Enable file tracking and duplicate detection
-            tracking_db_path: Path to tracking database
+            tracking_db_path: Path to SQLite tracking database
         """
         # Load from environment if not provided
         load_dotenv()
 
-        self.tenant_id = tenant_id or os.getenv("TENANT_ID")
         self.client_id = client_id or os.getenv("CLIENT_ID")
         self.client_secret = client_secret or os.getenv("CLIENT_SECRET")
         self.site_url = site_url or os.getenv("SITE_URL")
@@ -96,43 +92,19 @@ class SharePointBlobSync:
             account_url=self.sas_info['account_url'],
             credential=self.sas_info['sas_token']
         )
-        self.container_client = self.blob_service_client.get_container_client(
-            self.sas_info['container_name']
-        )
 
         # Initialize SharePoint uploader
-        # Note: We'll create a custom connection string from SAS components
         self.uploader = SharePointToBlobUploader(
             sharepoint_site_url=self.site_url,
             sharepoint_client_id=self.client_id,
             sharepoint_client_secret=self.client_secret,
-            blob_connection_string=self._create_connection_string_from_sas(),
+            blob_service_client=self.blob_service_client,
             blob_container_name=self.sas_info['container_name'],
-            enable_tracking=enable_tracking,
             tracking_db_path=tracking_db_path
         )
 
-        # Initialize tracker
-        if enable_tracking:
-            self.tracker = FileTracker(tracking_db_path)
-        else:
-            self.tracker = None
-
-    def _create_connection_string_from_sas(self) -> str:
-        """
-        Create a connection string format from SAS URL.
-        Note: This is a workaround. For production, use proper BlobServiceClient with SAS.
-        """
-        # Extract account name from URL
-        account_name = self.sas_info['account_url'].split('//')[1].split('.')[0]
-
-        # For SAS, we can use a connection string format that includes the SAS token
-        # However, the uploader uses connection string internally
-        # Better approach: modify uploader to accept BlobServiceClient directly
-
-        # For now, return a placeholder - you may need to modify SharePointToBlobUploader
-        # to accept container_client directly instead of connection_string
-        return f"BlobEndpoint={self.sas_info['account_url']};SharedAccessSignature={self.sas_info['sas_token']}"
+        # Reference to tracker
+        self.tracker = self.uploader.tracker
 
     def sync_files(
         self,
@@ -163,49 +135,15 @@ class SharePointBlobSync:
 
         return results
 
-    def batch_sync(
-        self,
-        batch_size: int = 10,
-        file_extensions: Optional[List[str]] = None,
-        resume_failed: bool = True
-    ) -> Dict:
-        """
-        Batch sync with resume capability.
-
-        Args:
-            batch_size: Number of files per batch
-            file_extensions: File extensions to filter
-            resume_failed: Retry failed files
-
-        Returns:
-            Batch processing results
-        """
-        return self.uploader.process_batch(
-            sharepoint_folder_path=self.drive_path,
-            blob_folder_prefix=os.getenv("BLOB_FOLDER_PREFIX"),
-            file_extensions=file_extensions,
-            batch_size=batch_size,
-            resume_failed=resume_failed
-        )
-
     def get_stats(self) -> Dict:
-        """Get sync statistics."""
-        if self.tracker:
-            return self.tracker.get_statistics()
-        return {"error": "Tracking not enabled"}
-
-    def retry_failed(self, max_retries: int = 3) -> List[Dict]:
-        """Retry failed transfers."""
-        return self.uploader.retry_failed_files(
-            sharepoint_folder_path=self.drive_path,
-            blob_folder_prefix=os.getenv("BLOB_FOLDER_PREFIX"),
-            max_retries=max_retries
-        )
+        """Get sync statistics from SQLite database."""
+        return self.tracker.get_statistics()
 
 
 def main():
     """
     Main function for command-line usage.
+    Syncs files from SharePoint to Azure Blob Storage with SQLite tracking.
     """
     # Load environment variables
     load_dotenv()
@@ -215,73 +153,73 @@ def main():
     missing = [var for var in required_vars if not os.getenv(var)]
 
     if missing:
-        print("❌ Missing required environment variables:")
+        print("Missing required environment variables:")
         for var in missing:
             print(f"   - {var}")
         print("\nPlease set these in your .env file")
         return
 
     print("\n" + "="*60)
-    print("SharePoint to Azure Blob Storage Sync")
+    print("SharePoint to Azure Blob Storage Sync (SQLite Tracking)")
     print("="*60)
 
     try:
         # Initialize sync
-        sync = SharePointBlobSync(enable_tracking=True)
+        sync = SharePointBlobSync()
 
         print(f"\nSharePoint Site: {sync.site_url}")
         print(f"Drive Path: {sync.drive_path}")
         print(f"Blob Container: {sync.sas_info['container_name']}")
         print(f"Blob Account: {sync.sas_info['account_url']}")
 
-        # Sync PDF files
+        # Sync PDF files (you can change extensions as needed)
         print("\n" + "-"*60)
-        print("Syncing PDF files...")
+        print("Syncing files from SharePoint...")
         print("-"*60)
 
         results = sync.sync_files(
-            file_extensions=[".pdf"],
+            file_extensions=[".pdf", ".docx", ".xlsx"],  # Customize as needed
             skip_duplicates=True
         )
 
         # Print results
-        print(f"\n📊 Sync Results:")
+        print(f"\nSync Results:")
         print(f"   Total files processed: {len(results)}")
 
         success = sum(1 for r in results if r['status'] == 'success')
         skipped = sum(1 for r in results if r['status'] == 'skipped')
         failed = sum(1 for r in results if r['status'] == 'failed')
 
-        print(f"   ✅ Successful: {success}")
-        print(f"   ⊘ Skipped (duplicates): {skipped}")
-        print(f"   ❌ Failed: {failed}")
+        print(f"   Successful: {success}")
+        print(f"   Skipped (duplicates): {skipped}")
+        print(f"   Failed: {failed}")
 
         # Show details
         if results:
-            print(f"\n📄 File Details:")
+            print(f"\nFile Details:")
             for result in results[:10]:  # Show first 10
-                icon = "✅" if result['status'] == 'success' else "⊘" if result['status'] == 'skipped' else "❌"
-                print(f"   {icon} {result['file_name']}: {result['status']}")
-                if result['status'] == 'skipped':
-                    print(f"      → Already exists: {result.get('existing_blob_url', 'N/A')[:80]}...")
+                status_icon = "[OK]" if result['status'] == 'success' else "[SKIP]" if result['status'] == 'skipped' else "[FAIL]"
+                print(f"   {status_icon} {result['file_name']}: {result['status']}")
+                if result['status'] == 'skipped' and 'existing_blob_url' in result:
+                    print(f"      Already exists in blob storage")
 
             if len(results) > 10:
                 print(f"   ... and {len(results) - 10} more files")
 
-        # Get statistics
-        print(f"\n📈 Tracking Statistics:")
+        # Get statistics from SQLite database
+        print(f"\nDatabase Statistics:")
         stats = sync.get_stats()
         print(f"   Total files tracked: {stats['total']}")
         for status, info in stats.get('by_status', {}).items():
-            size_mb = info['total_size'] / 1024 / 1024
+            size_mb = info['total_size'] / 1024 / 1024 if info['total_size'] else 0
             print(f"   {status}: {info['count']} files ({size_mb:.2f} MB)")
 
         print("\n" + "="*60)
-        print("✅ Sync completed successfully!")
+        print("Sync completed successfully!")
         print("="*60 + "\n")
 
     except Exception as e:
-        print(f"\n❌ Error during sync: {e}")
+        print(f"\nError during sync: {e}")
         import traceback
         traceback.print_exc()
 
